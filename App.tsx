@@ -3,11 +3,12 @@ import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './components/Dashboard';
 import { Customers } from './components/Customers';
 import { Farms } from './components/Farms';
+import { Accounts } from './components/Accounts';
 import { Sales } from './components/Sales';
 import { Receivables } from './components/Receivables';
 import { Vouchers } from './components/Vouchers';
 import { Reports } from './components/Reports';
-import { AppState, ViewName, Customer, Farm, Sale, Receivable, Voucher } from './types';
+import { AppState, ViewName, Customer, Farm, Sale, Receivable, Voucher, Account } from './types';
 import { loadState, saveState } from './services/storage';
 import { Menu } from 'lucide-react';
 
@@ -32,12 +33,26 @@ function App() {
         const reader = new FileReader();
         reader.onload = (ev) => {
           try {
-            const newState = JSON.parse(ev.target?.result as string);
-            if(newState.customers && newState.farms) {
-              setState(newState);
-              alert('Import successful');
+            const loaded = JSON.parse(ev.target?.result as string);
+            // Sanitize and migrate structure
+            if (Array.isArray(loaded.customers) && Array.isArray(loaded.farms)) {
+                const newState: AppState = {
+                    customers: loaded.customers || [],
+                    farms: loaded.farms || [],
+                    accounts: Array.isArray(loaded.accounts) && loaded.accounts.length > 0 
+                        ? loaded.accounts 
+                        : [
+                            { id: 1, name: 'Cash in Hand', type: 'cash', initialBalance: 0 },
+                            { id: 2, name: 'Bank Account', type: 'bank', initialBalance: 0 }
+                          ],
+                    sales: loaded.sales || [],
+                    receivables: loaded.receivables || [],
+                    vouchers: loaded.vouchers || [],
+                };
+                setState(newState);
+                alert('Import successful');
             } else {
-              alert('Invalid file format');
+              alert('Invalid file format: Missing customers or farms data.');
             }
           } catch(err) {
             console.error(err);
@@ -62,7 +77,17 @@ function App() {
 
   const handleClear = () => {
     if (confirm('Are you sure you want to delete ALL data?')) {
-      setState({ customers: [], farms: [], sales: [], receivables: [], vouchers: [] });
+      setState({ 
+          customers: [], 
+          farms: [], 
+          accounts: [
+            { id: 1, name: 'Cash in Hand', type: 'cash', initialBalance: 0 },
+            { id: 2, name: 'Bank Account', type: 'bank', initialBalance: 0 }
+          ], 
+          sales: [], 
+          receivables: [], 
+          vouchers: [] 
+        });
     }
   };
 
@@ -76,13 +101,12 @@ function App() {
     setState(prev => ({ ...prev, customers: prev.customers.map(x => x.id === c.id ? c : x) }));
   };
   const deleteCustomer = (id: number) => {
-    // Cascading delete
     setState(prev => ({
       ...prev,
       customers: prev.customers.filter(c => c.id !== id),
       sales: prev.sales.filter(s => s.customerId !== id),
       receivables: prev.receivables.filter(r => r.customerId !== id),
-      vouchers: prev.vouchers.filter(v => !v.description.includes(`CUST-${id}`)) // Simplified heuristic, ideally use IDs
+      vouchers: prev.vouchers.filter(v => !v.description.includes(`CUST-${id}`))
     }));
   };
 
@@ -98,8 +122,18 @@ function App() {
       ...prev,
       farms: prev.farms.filter(f => f.id !== id),
       sales: prev.sales.filter(s => s.farmId !== id),
-      // Remove vouchers related to sales from this farm? Complex. For now, keep simple.
     }));
+  };
+
+  const addAccount = (a: Omit<Account, 'id'>) => {
+    const id = (state.accounts.length > 0 ? Math.max(...state.accounts.map(x => x.id)) : 0) + 1;
+    setState(prev => ({ ...prev, accounts: [...prev.accounts, { ...a, id }] }));
+  };
+  const updateAccount = (a: Account) => {
+    setState(prev => ({ ...prev, accounts: prev.accounts.map(x => x.id === a.id ? a : x) }));
+  };
+  const deleteAccount = (id: number) => {
+    setState(prev => ({ ...prev, accounts: prev.accounts.filter(a => a.id !== id) }));
   };
 
   const addSale = (s: Omit<Sale, 'id'>) => {
@@ -111,7 +145,6 @@ function App() {
     const farm = state.farms.find(f => f.id === sale.farmId);
     const voucherId = (state.vouchers.length > 0 ? Math.max(...state.vouchers.map(x => x.id)) : 0) + 1;
     
-    // Include vehicle number in description if present
     const vehicleInfo = sale.vehicleNumber ? ` (${sale.vehicleNumber})` : '';
     const description = `Sale #${sale.id} - ${customer?.name}${vehicleInfo}`;
 
@@ -134,11 +167,8 @@ function App() {
   };
 
   const updateSale = (s: Sale) => {
-    // Update Voucher
     const customer = state.customers.find(c => c.id === s.customerId);
     const farm = state.farms.find(f => f.id === s.farmId);
-    
-    // Include vehicle number in description if present
     const vehicleInfo = s.vehicleNumber ? ` (${s.vehicleNumber})` : '';
     const description = `Sale #${s.id} - ${customer?.name}${vehicleInfo}`;
 
@@ -175,13 +205,18 @@ function App() {
 
     // Create Voucher
     const customer = state.customers.find(c => c.id === item.customerId);
+    // Determine the debit account name (the receiving account)
+    // Default to Cash in Hand if accounts is corrupted or empty
+    const targetAccount = state.accounts?.find(a => a.id === item.accountId);
+    const debitAccountName = targetAccount ? targetAccount.name : 'Cash in Hand';
+
     const voucherId = (state.vouchers.length > 0 ? Math.max(...state.vouchers.map(x => x.id)) : 0) + 1;
 
     const voucher: Voucher = {
       id: voucherId,
       date: item.date,
       description: `Receipt #${item.id} - ${customer?.name}`,
-      debitAccount: 'Cash/Bank',
+      debitAccount: debitAccountName,
       creditAccount: `Customer - ${customer?.name}`,
       amount: item.amount,
       relatedId: item.id,
@@ -197,6 +232,9 @@ function App() {
 
   const updateReceivable = (r: Receivable) => {
      const customer = state.customers.find(c => c.id === r.customerId);
+     const targetAccount = state.accounts?.find(a => a.id === r.accountId);
+     const debitAccountName = targetAccount ? targetAccount.name : 'Cash in Hand';
+
      setState(prev => ({
       ...prev,
       receivables: prev.receivables.map(x => x.id === r.id ? r : x),
@@ -206,6 +244,7 @@ function App() {
              ...v,
              date: r.date,
              description: `Receipt #${r.id} - ${customer?.name}`,
+             debitAccount: debitAccountName,
              creditAccount: `Customer - ${customer?.name}`,
              amount: r.amount
           };
@@ -236,9 +275,8 @@ function App() {
       />
       
       <main className="flex-1 flex flex-col h-screen overflow-hidden relative">
-        {/* Mobile Header */}
         <div className="md:hidden bg-white border-b border-gray-200 p-4 flex items-center justify-between">
-           <h1 className="font-bold text-gray-800">Poultry ERP</h1>
+           <h1 className="font-bold text-gray-800 uppercase">AL REHMAN POULTRY FARMS</h1>
            <button onClick={() => setIsMobileSidebarOpen(true)} className="p-2 text-gray-600">
              <Menu />
            </button>
@@ -249,6 +287,7 @@ function App() {
             {activeView === 'dashboard' && <Dashboard state={state} />}
             {activeView === 'customers' && <Customers customers={state.customers} state={state} onAdd={addCustomer} onUpdate={updateCustomer} onDelete={deleteCustomer} />}
             {activeView === 'farms' && <Farms farms={state.farms} state={state} onAdd={addFarm} onUpdate={updateFarm} onDelete={deleteFarm} />}
+            {activeView === 'accounts' && <Accounts accounts={state.accounts || []} state={state} onAdd={addAccount} onUpdate={updateAccount} onDelete={deleteAccount} />}
             {activeView === 'sales' && <Sales sales={state.sales} state={state} onAdd={addSale} onUpdate={updateSale} onDelete={deleteSale} />}
             {activeView === 'receivables' && <Receivables receivables={state.receivables} state={state} onAdd={addReceivable} onUpdate={updateReceivable} onDelete={deleteReceivable} />}
             {activeView === 'vouchers' && <Vouchers state={state} />}
